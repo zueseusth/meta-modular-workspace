@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: meta-modular-workspace
+    runtime: static
+    buildCommand: echo 'META static site ready'
+    staticPublishPath: .
+    autoDeployTrigger: commit
