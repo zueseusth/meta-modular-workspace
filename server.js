@@ -23,10 +23,29 @@ async function init(){
  await pool.query('CREATE TABLE IF NOT EXISTS meta_files (id text primary key, payload jsonb not null, updated_at timestamptz not null default now())');
 }
 function ready(){if(!initPromise)initPromise=init().catch(err=>{initPromise=null;throw err});return initPromise}
+const loginAttempts=new Map();
+function safeEqual(a,b){const aa=Buffer.from(String(a)),bb=Buffer.from(String(b));return aa.length===bb.length&&crypto.timingSafeEqual(aa,bb)}
+function sign(data){return crypto.createHmac('sha256',process.env.META_ACCESS_TOKEN).update(data).digest('base64url')}
+app.post('/api/login',(req,res)=>{
+ const ip=req.ip||'unknown',current=Date.now(),old=loginAttempts.get(ip)||{count:0,until:0};
+ if(old.until<current){old.count=0;old.until=current+15*60*1000}
+ if(old.count>=5)return res.status(429).json({error:'Too many attempts. Try again later.'});
+ if(!process.env.META_ACCESS_TOKEN||!process.env.META_LOGIN_PASSWORD)return res.status(503).json({error:'Login not configured'});
+ if(!safeEqual(req.body?.password||'',process.env.META_LOGIN_PASSWORD)){
+  old.count++;loginAttempts.set(ip,old);return res.status(401).json({error:'Incorrect password'});
+ }
+ loginAttempts.delete(ip);
+ const payload=Buffer.from(JSON.stringify({exp:Date.now()+12*60*60*1000})).toString('base64url');
+ res.json({token:payload+'.'+sign(payload),expiresIn:43200});
+});
 function auth(req,res,next){
  const secret=process.env.META_ACCESS_TOKEN;
  const token=(req.get('authorization')||'').replace(/^Bearer\s+/i,'');
- if(!secret||!token||Buffer.byteLength(token)!==Buffer.byteLength(secret)||!crypto.timingSafeEqual(Buffer.from(token),Buffer.from(secret)))return res.status(401).json({error:'Unauthorized'});
+ if(!secret||!token||!token.includes('.'))return res.status(401).json({error:'Unauthorized'});
+ const [payload,signature,...extra]=token.split('.');
+ if(extra.length||!signature||!safeEqual(sign(payload),signature))return res.status(401).json({error:'Unauthorized'});
+ try{if(JSON.parse(Buffer.from(payload,'base64url').toString()).exp<=Date.now())return res.status(401).json({error:'Session expired'})}
+ catch{return res.status(401).json({error:'Unauthorized'})}
  next();
 }
 app.get('/health',async(req,res)=>{try{await ready();await pool.query('SELECT 1');res.json({status:'ok',database:'connected'})}catch(e){res.status(503).json({status:'unavailable',database:'not_connected'})}});
